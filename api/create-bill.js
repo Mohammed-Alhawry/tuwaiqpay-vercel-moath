@@ -1,6 +1,5 @@
 // api/create-bill.js
 export default async function handler(req, res) {
-  return res.status(200).json({ where: "THIS IS VERCEL FILE" });
 
   // Allow CORS from your GHL domain or everyone (for testing)
   res.setHeader("Access-Control-Allow-Origin", "*");

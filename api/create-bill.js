@@ -1,95 +1,86 @@
 export default async function handler(req, res) {
-  // ✅ CORS HEADERS (REQUIRED)
-  res.setHeader("Access-Control-Allow-Origin", "https://app.emsprofitai.com");
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  
-
-
-  // ✅ Handle preflight (browser check)
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Not allowed" });
 
   try {
-    const {
-      amount,
-      customerName,
-      customerPhone,
-      customerEmail,
-      customerStatus
-    } = req.body;
+    const { amount, customerName, customerPhone, customerEmail } = req.body;
 
-    // --- AUTH ---
-    const authResp = await fetch(
-      "https://onboarding-prod.tuwaiqpay.com.sa/api/v1/auth/authenticate",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Language": "ar"
-        },
-        body: JSON.stringify({
-          username: process.env.TUWAIQ_USERNAME,
-          userNameType: process.env.TUWAIQ_USERNAME_TYPE || "MOBILE",
-          password: process.env.TUWAIQ_PASSWORD
-        })
-      }
-    );
+    // Call TuwaiqPay to create bill
+    const auth = await fetch("https://onboarding-prod.tuwaiqpay.com.sa/api/v1/auth/authenticate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Language": "ar" },
+      body: JSON.stringify({
+        username: process.env.TUWAIQ_USERNAME,
+        userNameType: process.env.TUWAIQ_USERNAME_TYPE || "MOBILE",
+        password: process.env.TUWAIQ_PASSWORD
+      })
+    });
+    const authJson = await auth.json();
+    const token = authJson.data?.access_token;
 
-    const authJson = await authResp.json();
-    const token = authJson?.data?.access_token;
+    if (!token) return res.status(500).json({ error: "Auth failed" });
 
-    if (!token) {
-      return res.status(500).json({ error: "Auth failed", authJson });
+    const billRes = await fetch("https://onboarding-prod.tuwaiqpay.com.sa/api/v1/integration/bills", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        actionDateInDays: 1,
+        amount,
+        currencyId: 1,
+        supportedPaymentMethods: ["VISA","MASTER","MADA","AMEX","STC_PAY","APPLE_PAY"],
+        billItems: [
+          {
+            description: "Course payment",
+            customerName,
+            customerMobilePhone: customerPhone,
+            includeVat: false,
+            continueWithMaxCharge: false
+          }
+        ]
+      })
+    });
+    const billJson = await billRes.json();
+
+    const data = billJson.data;
+    if (!data?.billId) {
+      return res.status(500).json({ error: "Bad pay response", billJson });
     }
 
-    // --- CREATE BILL ---
-    const billResp = await fetch(
-      "https://onboarding-prod.tuwaiqpay.com.sa/api/v1/integration/bills",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          actionDateInDays: 1,
-          amount,
-          currencyId: 1,
-          supportedPaymentMethods: [
-            "VISA",
-            "MASTER",
-            "MADA",
-            "AMEX",
-            "STC_PAY",
-            "APPLE_PAY"
-          ],
-          description: "Course payment",
-          customerName,
-          customerMobilePhone: customerPhone,
-          includeVat: false,
-          continueWithMaxCharge: false
-        })
-      }
-    );
+    // Save to Google Sheet via Apps Script
+    await fetch(process.env.GSHEET_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        billId: data.billId,
+        name: customerName,
+        phone: customerPhone,
+        email: customerEmail,
+        amount: data.amount,
+        payment_link: data.link,
+        processed: false,
+        transactionId: "",
+        paidAt: ""
+      })
+    });
 
-    const billJson = await billResp.json();
-
+    // Return payment link
     return res.status(200).json({
       success: true,
-      data: billJson.data
+      data: {
+        billId: data.billId,
+        link: data.link
+      }
     });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      error: "Server error",
-      details: err.message
-    });
+    console.error("create-bill error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 }

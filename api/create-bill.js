@@ -80,27 +80,23 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          actionDateInDays: 1,
-          amount: Number(amount),
-          currencyId: 1,
-          supportedPaymentMethods: [
-            "VISA",
-            "MASTER",
-            "MADA",
-            "AMEX",
-            "STC_PAY",
-            "APPLE_PAY"
-          ],
-          billItems: [
-            {
-              description: "Course payment",
-              customerName: customerName,
-              customerMobilePhone: customerPhone,
-              includeVat: false,
-              continueWithMaxCharge: false
-            }
-          ]
-        })
+  actionDateInDays: 1,
+  amount: Number(amount),
+  currencyId: 1,
+  supportedPaymentMethods: [
+    "VISA",
+    "MASTER",
+    "MADA",
+    "AMEX",
+    "STC_PAY",
+    "APPLE_PAY"
+  ],
+  description: "Course payment",
+  customerName: customerName,
+  customerMobilePhone: customerPhone,
+  includeVat: false,
+  continueWithMaxCharge: false
+})
       }
     );
 

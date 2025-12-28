@@ -14,7 +14,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ===== SAFETY CHECK (THIS FIXES YOUR ERROR) =====
+  // Safety check for empty body
   if (!req.body || Object.keys(req.body).length === 0) {
     return res.status(400).json({ error: "Empty or invalid JSON body" });
   }
@@ -47,12 +47,27 @@ export default async function handler(req, res) {
       }
     );
 
-    const authJson = await authRes.json();
+    const authText = await authRes.text();
+    let authJson;
+
+    try {
+      authJson = JSON.parse(authText);
+    } catch (e) {
+      console.error("Auth response not JSON:", authText);
+      return res.status(500).json({
+        error: "Auth response is not JSON",
+        response: authText
+      });
+    }
+
     const token = authJson?.data?.access_token;
 
     if (!token) {
       console.error("Auth failed:", authJson);
-      return res.status(500).json({ error: "Auth failed with TuwaiqPay" });
+      return res.status(500).json({
+        error: "Auth failed with TuwaiqPay",
+        response: authJson
+      });
     }
 
     // ===== 2) CREATE BILL =====
@@ -89,18 +104,30 @@ export default async function handler(req, res) {
       }
     );
 
-    const billJson = await billRes.json();
+    const billText = await billRes.text();
+    let billJson;
+
+    try {
+      billJson = JSON.parse(billText);
+    } catch (e) {
+      console.error("Create bill response not JSON:", billText);
+      return res.status(500).json({
+        error: "Create bill response is not JSON",
+        response: billText
+      });
+    }
+
     const data = billJson?.data;
 
     if (!data?.billId || !data?.link) {
       console.error("Create bill failed:", billJson);
       return res.status(500).json({
         error: "Failed to create bill",
-        tuwaiqResponse: billJson
+        response: billJson
       });
     }
 
-    // ===== 3) SAVE TO GOOGLE SHEETS =====
+    // ===== 3) SAVE TO GOOGLE SHEETS (OPTIONAL) =====
     if (process.env.GSHEET_URL) {
       await fetch(process.env.GSHEET_URL, {
         method: "POST",

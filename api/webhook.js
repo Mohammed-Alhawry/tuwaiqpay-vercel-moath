@@ -42,6 +42,22 @@ export default async function handler(req, res) {
     }
 
     if (status === "SUCCESS") {
+// 🔁 Send payment info to GoHighLevel
+await fetch("https://services.leadconnectorhq.com/hooks/5ND2fBFJC6wGKm5coBDb/webhook-trigger/bb373eb3-e8b3-4801-8096-bcac803cea35", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    billId,
+    amount,
+    status,
+    transactionId,
+    paymentMethod,
+    paidAt
+  })
+});
+
       // هنا تعتبر الدفع ناجح
       // todo:
       // - حفظ البيانات في DB

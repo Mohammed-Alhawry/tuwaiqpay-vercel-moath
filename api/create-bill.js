@@ -1,76 +1,125 @@
 export default async function handler(req, res) {
-  // CORS
+  // ===== CORS =====
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Not allowed" });
+
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // Allow only POST
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // ===== SAFETY CHECK (THIS FIXES YOUR ERROR) =====
+  if (!req.body || Object.keys(req.body).length === 0) {
+    return res.status(400).json({ error: "Empty or invalid JSON body" });
+  }
 
   try {
     const { amount, customerName, customerPhone, customerEmail } = req.body;
 
-    // Call TuwaiqPay to create bill
-    const auth = await fetch("https://onboarding-prod.tuwaiqpay.com.sa/api/v1/auth/authenticate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Language": "ar" },
-      body: JSON.stringify({
-        username: process.env.TUWAIQ_USERNAME,
-        userNameType: process.env.TUWAIQ_USERNAME_TYPE || "MOBILE",
-        password: process.env.TUWAIQ_PASSWORD
-      })
-    });
-    const authJson = await auth.json();
-    const token = authJson.data?.access_token;
-
-    if (!token) return res.status(500).json({ error: "Auth failed" });
-
-    const billRes = await fetch("https://onboarding-prod.tuwaiqpay.com.sa/api/v1/integration/bills", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        actionDateInDays: 1,
-        amount,
-        currencyId: 1,
-        supportedPaymentMethods: ["VISA","MASTER","MADA","AMEX","STC_PAY","APPLE_PAY"],
-        billItems: [
-          {
-            description: "Course payment",
-            customerName,
-            customerMobilePhone: customerPhone,
-            includeVat: false,
-            continueWithMaxCharge: false
-          }
-        ]
-      })
-    });
-    const billJson = await billRes.json();
-
-    const data = billJson.data;
-    if (!data?.billId) {
-      return res.status(500).json({ error: "Bad pay response", billJson });
+    // Validate required fields
+    if (!amount || !customerName || !customerPhone) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        required: ["amount", "customerName", "customerPhone"]
+      });
     }
 
-    // Save to Google Sheet via Apps Script
-    await fetch(process.env.GSHEET_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        billId: data.billId,
-        name: customerName,
-        phone: customerPhone,
-        email: customerEmail,
-        amount: data.amount,
-        payment_link: data.link,
-        processed: false,
-        transactionId: "",
-        paidAt: ""
-      })
-    });
+    // ===== 1) AUTH WITH TUWAIQPAY =====
+    const authRes = await fetch(
+      "https://onboarding-prod.tuwaiqpay.com.sa/api/v1/auth/authenticate",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Language": "ar"
+        },
+        body: JSON.stringify({
+          username: process.env.TUWAIQ_USERNAME,
+          userNameType: process.env.TUWAIQ_USERNAME_TYPE || "MOBILE",
+          password: process.env.TUWAIQ_PASSWORD
+        })
+      }
+    );
 
-    // Return payment link
+    const authJson = await authRes.json();
+    const token = authJson?.data?.access_token;
+
+    if (!token) {
+      console.error("Auth failed:", authJson);
+      return res.status(500).json({ error: "Auth failed with TuwaiqPay" });
+    }
+
+    // ===== 2) CREATE BILL =====
+    const billRes = await fetch(
+      "https://onboarding-prod.tuwaiqpay.com.sa/api/v1/integration/bills",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          actionDateInDays: 1,
+          amount: Number(amount),
+          currencyId: 1,
+          supportedPaymentMethods: [
+            "VISA",
+            "MASTER",
+            "MADA",
+            "AMEX",
+            "STC_PAY",
+            "APPLE_PAY"
+          ],
+          billItems: [
+            {
+              description: "Course payment",
+              customerName: customerName,
+              customerMobilePhone: customerPhone,
+              includeVat: false,
+              continueWithMaxCharge: false
+            }
+          ]
+        })
+      }
+    );
+
+    const billJson = await billRes.json();
+    const data = billJson?.data;
+
+    if (!data?.billId || !data?.link) {
+      console.error("Create bill failed:", billJson);
+      return res.status(500).json({
+        error: "Failed to create bill",
+        tuwaiqResponse: billJson
+      });
+    }
+
+    // ===== 3) SAVE TO GOOGLE SHEETS =====
+    if (process.env.GSHEET_URL) {
+      await fetch(process.env.GSHEET_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          billId: data.billId,
+          name: customerName,
+          phone: customerPhone,
+          email: customerEmail || "",
+          amount: data.amount,
+          payment_link: data.link,
+          processed: false,
+          transactionId: "",
+          paidAt: ""
+        })
+      });
+    }
+
+    // ===== 4) RETURN PAYMENT LINK =====
     return res.status(200).json({
       success: true,
       data: {
@@ -81,6 +130,9 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error("create-bill error:", err);
-    return res.status(500).json({ error: "Server error" });
+    return res.status(500).json({
+      error: "Server error",
+      details: String(err)
+    });
   }
 }

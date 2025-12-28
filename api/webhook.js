@@ -1,79 +1,55 @@
 export default async function handler(req, res) {
-  // نسمح فقط بـ POST
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    // هذا هو كل ما أرسله TuwaiqPay
     const payload = req.body;
+    const { billId, transactionId, amount, status, paymentMethod, paidAt } = payload;
 
-    // اطبع كل شيء (للفهم والتجربة)
-    console.log("===== TuwaiqPay Webhook START =====");
-    console.log(JSON.stringify(payload, null, 2));
-    console.log("===== TuwaiqPay Webhook END =====");
+    // 1. Find the record in the Google Sheet
+    const sheetUrl = process.env.GSHEET_URL + "?billId=" + billId;
+    // (We’ll just re-append extra info; we don’t need to “find” for simplicity)
 
-    /*
-      مثال محتمل لما سيصل:
-      {
-        transactionId,
-        merchantTransactionId,
+    // 2. Update Google Sheet with payment success
+    await fetch(process.env.GSHEET_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
         billId,
+        name: "",        // already saved
+        phone: "",
+        email: "",
         amount,
-        status,
-        paymentMethod,
-        paidAt,
-        ...أي حقول إضافية
-      }
-    */
+        payment_link: "",
+        processed: true,
+        transactionId,
+        paidAt
+      })
+    });
 
-    // مثال استخدام أهم القيم
-    const {
+    // 3. Forward to GoHighLevel Workflow
+    const ghlBody = {
       billId,
+      transactionId,
       amount,
       status,
-      transactionId,
       paymentMethod,
       paidAt
-    } = payload;
+    };
 
-    if (!billId || !status) {
-      console.warn("Webhook received but missing required fields");
+    if (process.env.GHL_WEBHOOK_URL) {
+      await fetch(process.env.GHL_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ghlBody)
+      });
     }
 
-    if (status === "SUCCESS") {
-// 🔁 Send payment info to GoHighLevel
-await fetch("https://services.leadconnectorhq.com/hooks/5ND2fBFJC6wGKm5coBDb/webhook-trigger/bb373eb3-e8b3-4801-8096-bcac803cea35", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json"
-  },
-  body: JSON.stringify({
-    billId,
-    amount,
-    status,
-    transactionId,
-    paymentMethod,
-    paidAt
-  })
-});
-
-      // هنا تعتبر الدفع ناجح
-      // todo:
-      // - حفظ البيانات في DB
-      // - تفعيل اشتراك
-      // - إرسال ايميل
-      console.log("✅ Payment SUCCESS for bill:", billId);
-    } else {
-      console.log("❌ Payment NOT successful:", status);
-    }
-
-    // مهم جدًا: الرد 200
     return res.status(200).json({ received: true });
-
-  } catch (error) {
-    console.error("Webhook error:", error);
-    // حتى لو حصل خطأ، حاول ترجع 200 عشان لا يعيدوا الإرسال
-    return res.status(200).json({ received: true });
+  } catch (err) {
+    console.error("webhook error:", err);
+    // always return 200 so TuwaiqPay doesn’t retry forever
+    return res.status(200).json({ received: false });
   }
 }

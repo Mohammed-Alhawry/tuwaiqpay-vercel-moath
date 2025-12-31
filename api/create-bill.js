@@ -1,3 +1,4 @@
+// /api/create-bill.js
 export default async function handler(req, res) {
   // ===== CORS =====
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -20,7 +21,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { amount, customerName, customerPhone, customerEmail } = req.body;
+    const { amount, customerName, customerPhone, customerEmail, customerStatus } = req.body;
 
     // Validate required fields
     if (!amount || !customerName || !customerPhone) {
@@ -49,7 +50,6 @@ export default async function handler(req, res) {
 
     const authText = await authRes.text();
     let authJson;
-
     try {
       authJson = JSON.parse(authText);
     } catch (e) {
@@ -61,7 +61,6 @@ export default async function handler(req, res) {
     }
 
     const token = authJson?.data?.access_token;
-
     if (!token) {
       console.error("Auth failed:", authJson);
       return res.status(500).json({
@@ -80,29 +79,28 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-  actionDateInDays: 1,
-  amount: Number(amount),
-  currencyId: 1,
-  supportedPaymentMethods: [
-    "VISA",
-    "MASTER",
-    "MADA",
-    "AMEX",
-    "STC_PAY",
-    "APPLE_PAY"
-  ],
-  description: "Course payment",
-  customerName: customerName,
-  customerMobilePhone: customerPhone,
-  includeVat: false,
-  continueWithMaxCharge: false
-})
+          actionDateInDays: 1,
+          amount: Number(amount),
+          currencyId: 1,
+          supportedPaymentMethods: [
+            "VISA",
+            "MASTER",
+            "MADA",
+            "AMEX",
+            "STC_PAY",
+            "APPLE_PAY"
+          ],
+          description: "Course payment",
+          customerName: customerName,
+          customerMobilePhone: customerPhone,
+          includeVat: false,
+          continueWithMaxCharge: false
+        })
       }
     );
 
     const billText = await billRes.text();
     let billJson;
-
     try {
       billJson = JSON.parse(billText);
     } catch (e) {
@@ -114,7 +112,6 @@ export default async function handler(req, res) {
     }
 
     const data = billJson?.data;
-
     if (!data?.billId || !data?.link) {
       console.error("Create bill failed:", billJson);
       return res.status(500).json({
@@ -125,21 +122,27 @@ export default async function handler(req, res) {
 
     // ===== 3) SAVE TO GOOGLE SHEETS (OPTIONAL) =====
     if (process.env.GSHEET_URL) {
-      await fetch(process.env.GSHEET_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          billId: data.billId,
-          name: customerName,
-          phone: customerPhone,
-          email: customerEmail || "",
-          amount: data.amount,
-          payment_link: data.link,
-          processed: false,
-          transactionId: "",
-          paidAt: ""
-        })
-      });
+      try {
+        await fetch(process.env.GSHEET_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            billId: data.billId,
+            customerStatus: customerStatus || "",
+            name: customerName,
+            phone: customerPhone,
+            email: customerEmail || "",
+            amount: data.amount,
+            payment_link: data.link,
+            processed: false,
+            transactionId: "",
+            paidAt: "",
+            paymentStatus: "" // reserved for gateway status when webhook arrives
+          })
+        });
+      } catch (e) {
+        console.error("Failed to write create-bill to sheet:", e);
+      }
     }
 
     // ===== 4) RETURN PAYMENT LINK =====

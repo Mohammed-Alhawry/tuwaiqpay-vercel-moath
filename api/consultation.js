@@ -41,6 +41,8 @@ export default async function handler(req, res) {
     // Validate consultationAt if provided
     let consultationDateUTC = null;
     let riyadhReadable = "";
+    let consultationDateOnly = "";
+    let consultationTimeOnly = "";
     if (consultationAt) {
       const parsed = Date.parse(consultationAt);
       if (isNaN(parsed)) {
@@ -66,7 +68,17 @@ export default async function handler(req, res) {
 
       // Prepare a readable Riyadh timestamp "YYYY-MM-DD HH:MM"
       const pad = (n) => String(n).padStart(2, "0");
-      riyadhReadable = `${riyadhDate.getUTCFullYear()}-${pad(riyadhDate.getUTCMonth()+1)}-${pad(riyadhDate.getUTCDate())} ${pad(riyadhDate.getUTCHours())}:${pad(riyadhDate.getUTCMinutes())} (+03:00)`;
+      const year = riyadhDate.getUTCFullYear();
+      const month = pad(riyadhDate.getUTCMonth() + 1);
+      const day = pad(riyadhDate.getUTCDate());
+      const hours = pad(riyadhDate.getUTCHours());
+      const minutes = pad(riyadhDate.getUTCMinutes());
+
+      riyadhReadable = `${year}-${month}-${day} ${hours}:${minutes} (+03:00)`;
+
+      // separate date & time fields (useful for Google Sheets parsing or filters)
+      consultationDateOnly = `${year}-${month}-${day}`; // YYYY-MM-DD (Riyadh)
+      consultationTimeOnly = `${hours}:${minutes}`; // HH:MM (Riyadh)
     }
 
     // ===== 1) AUTH WITH TUWAIQPAY =====
@@ -128,7 +140,6 @@ export default async function handler(req, res) {
             "STC_PAY",
             "APPLE_PAY"
           ],
-          // changed description to reflect consultation booking
           description: "Consultation booking",
           customerName: customerName,
           customerMobilePhone: customerPhone,
@@ -160,35 +171,44 @@ export default async function handler(req, res) {
     }
 
     // ===== 3) SAVE TO GOOGLE SHEETS (OPTIONAL) =====
+    // NOTE: Make sure you set env var GSHEET_CONSULTATION_URL to your Apps Script / webhook URL
     if (process.env.GSHEET_CONSULTATION_URL) {
       try {
-        const sheetPayload = {
-          billId: data.billId,
-          customerStatus: customerStatus || "",
-          name: customerName,
-          phone: customerPhone,
-          email: customerEmail || "",
-          amount: data.amount,
-          payment_link: data.link,
-          processed: false,
-          transactionId: "",
-          paidAt: "",
-          paymentStatus: ""
-        };
+     const sheetPayload = {
+  billId: data.billId,
+  customerStatus: customerStatus || "",
+  name: customerName,
+  phone: customerPhone,
+  email: customerEmail || "",
+  amount: data.amount,
+  payment_link: data.link,
+  processed: false,
+  transactionId: "",
+  paidAt: "",
+  paymentStatus: "",
+  // always present (null when not provided)
+  consultationAtUTC: consultationDateUTC ? consultationDateUTC.toISOString() : null,
+  consultationAtRiyadh: consultationDateUTC ? riyadhReadable : null,
+  consultationDateRiyadh: consultationDateUTC ? consultationDateOnly : null,
+  consultationTimeRiyadh: consultationDateUTC ? consultationTimeOnly : null
+};
+
 
         // add consultation fields if present
         if (consultationDateUTC) {
           sheetPayload.consultationAtUTC = consultationDateUTC.toISOString(); // UTC ISO string
           sheetPayload.consultationAtRiyadh = riyadhReadable; // human-friendly Riyadh time
+          sheetPayload.consultationDateRiyadh = consultationDateOnly; // YYYY-MM-DD
+          sheetPayload.consultationTimeRiyadh = consultationTimeOnly; // HH:MM
         }
 
-        await fetch(process.env.GSHEET_URL, {
+        await fetch(process.env.GSHEET_CONSULTATION_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(sheetPayload)
         });
       } catch (e) {
-        console.error("Failed to write create-bill to sheet:", e);
+        console.error("Failed to write consultation to sheet:", e);
       }
     }
 
@@ -199,7 +219,9 @@ export default async function handler(req, res) {
         billId: data.billId,
         link: data.link,
         consultationAtUTC: consultationDateUTC ? consultationDateUTC.toISOString() : null,
-        consultationAtRiyadh: riyadhReadable || null
+        consultationAtRiyadh: riyadhReadable || null,
+        consultationDateRiyadh: consultationDateOnly || null,
+        consultationTimeRiyadh: consultationTimeOnly || null
       }
     });
 

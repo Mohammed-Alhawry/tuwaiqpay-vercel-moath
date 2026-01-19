@@ -160,7 +160,7 @@ export default async function handler(req, res) {
     }
 
     // ===== 3) SAVE TO GOOGLE SHEETS (OPTIONAL) =====
-    if (process.env.GSHEET_URL) {
+    if (process.env.GSHEET_CONSULTATION_URL) {
       try {
         const sheetPayload = {
           billId: data.billId,

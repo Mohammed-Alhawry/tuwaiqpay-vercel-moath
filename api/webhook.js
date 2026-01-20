@@ -11,6 +11,68 @@ export default async function handler(req, res) {
 
     const payload = req.body || {};
 
+    // small helpers ---------------------------------------------------------
+    const stripBidi = (s) => {
+      if (!s && s !== 0) return "";
+      return String(s).replace(/[\u202A-\u202E]/g, "").trim();
+    };
+
+    // parse many shapes into a Date (UTC) or return null
+    const parseToDate = (v) => {
+      if (!v && v !== 0) return null;
+
+      // If array like [Y,M,D,h,m,s]
+      if (Array.isArray(v) && v.length >= 3) {
+        const [Y, M, D, h = 0, m = 0, s = 0] = v.map(Number);
+        // create as UTC
+        return new Date(Date.UTC(Y, M - 1, D, h, m, s));
+      }
+
+      // If already a Date
+      if (v instanceof Date && !isNaN(v)) return v;
+
+      // Try native parse (covers ISO with TZ)
+      try {
+        const d = new Date(String(v));
+        if (!isNaN(d)) return d;
+      } catch (e) { /* fallthrough */ }
+
+      // Match common "YYYY-MM-DD HH:mm(:ss)? (±HH:MM)?" or "YYYY/MM/DD ..." patterns
+      const re = /(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?: *\(?([+\-]?\d{1,2})(?::?(\d{2}))?\)?)?/;
+      const m = String(v).match(re);
+      if (m) {
+        const Y = Number(m[1]), Mo = Number(m[2]), D = Number(m[3]);
+        const h = Number(m[4] || 0), mi = Number(m[5] || 0), s = Number(m[6] || 0);
+        const tzHour = (typeof m[7] !== "undefined" && m[7] !== "") ? Number(m[7]) : 3; // assume +03 if not provided
+        const tzMin = (typeof m[8] !== "undefined" && m[8] !== "") ? Number(m[8]) : 0;
+        // Build ISO with explicit offset so Date can parse reliably
+        const sign = tzHour >= 0 ? "+" : "-";
+        const iso = `${String(Y).padStart(4,"0")}-${String(Mo).padStart(2,"0")}-${String(D).padStart(2,"0")}T${String(h).padStart(2,"0")}:${String(mi).padStart(2,"0")}:${String(s).padStart(2,"0")}${sign}${String(Math.abs(tzHour)).padStart(2,"0")}:${String(Math.abs(tzMin)).padStart(2,"0")}`;
+        const d = new Date(iso);
+        if (!isNaN(d)) return d;
+      }
+
+      return null;
+    };
+
+    const fmtRiyadh = (dt) => {
+      if (!dt || isNaN(dt)) return { full: "", date: "", time: "" };
+      // dt is a Date (UTC). Riyadh = UTC + 3
+      const rMs = dt.getTime() + 3 * 3600 * 1000;
+      const r = new Date(rMs);
+      const pad = (n) => String(n).padStart(2, "0");
+      const yyyy = r.getUTCFullYear();
+      const mm = pad(r.getUTCMonth() + 1);
+      const dd = pad(r.getUTCDate());
+      const HH = pad(r.getUTCHours());
+      const MM = pad(r.getUTCMinutes());
+      return {
+        full: `${yyyy}-${mm}-${dd} ${HH}:${MM} (+03:00)`,
+        date: `${yyyy}-${mm}-${dd}`,
+        time: `${HH}:${MM}`
+      };
+    };
+
     // --- normalize payload (support nested TuwaiqPay shape) ---
     let billId = null;
     let transactionId = null;
@@ -86,10 +148,10 @@ export default async function handler(req, res) {
         if (parsed && parsed.success && parsed.record) {
           contactPhone = parsed.record.phone || "";
           contactEmail = parsed.record.email || "";
-          contactName  = parsed.record.name || "";
+          contactName  = stripBidi(parsed.record.name || "");
           contactStatus = parsed.record.customerStatus || "";
 
-          // <-- NEW: grab consultation fields from sheet record (with snake_case fallbacks)
+          // grab consultation fields from sheet record (with snake_case fallbacks)
           contactConsultationAtUTC = parsed.record.consultationAtUTC || parsed.record.consultation_at_utc || "";
           contactConsultationAtRiyadh = parsed.record.consultationAtRiyadh || parsed.record.consultation_at_riyadh || "";
           contactConsultationDateRiyadh = parsed.record.consultationDateRiyadh || parsed.record.consultation_date_riyadh || "";
@@ -123,9 +185,10 @@ export default async function handler(req, res) {
         const postBody = {
           billId,
           customerStatus: contactStatus || "",
-          name: contactName || "",
-          phone: contactPhone || "",
-          email: contactEmail || "",
+          // prefer cleaned name
+          name: stripBidi(contactName || payload.name || ""),
+          phone: contactPhone || payload.phone || "",
+          email: contactEmail || payload.email || "",
           amount,
           payment_link: "",
           processed: (status === "SUCCESS" || status === "SETTLED" || status === "PAID") ? true : true,
@@ -134,12 +197,29 @@ export default async function handler(req, res) {
           paymentStatus: status || ""
         };
 
-        // If consultation, include the extra consultation fields (payload preferred, otherwise use sheet values)
+        // If consultation, build normalized consultation fields (prefer payload, else sheet)
         if (isConsultation) {
-          postBody.consultationAtUTC = payload.consultationAtUTC || payload.consultation_at_utc || contactConsultationAtUTC || "";
-          postBody.consultationAtRiyadh = payload.consultationAtRiyadh || payload.consultation_at_riyadh || contactConsultationAtRiyadh || "";
-          postBody.consultationDateRiyadh = payload.consultationDateRiyadh || payload.consultation_date_riyadh || contactConsultationDateRiyadh || "";
-          postBody.consultationTimeRiyadh = payload.consultationTimeRiyadh || payload.consultation_time_riyadh || contactConsultationTimeRiyadh || "";
+          const rawUTC = payload.consultationAtUTC || payload.consultation_at_utc || contactConsultationAtUTC || null;
+          const rawRiyadh = payload.consultationAtRiyadh || payload.consultation_at_riyadh || contactConsultationAtRiyadh || null;
+          const rawDateR = payload.consultationDateRiyadh || payload.consultation_date_riyadh || contactConsultationDateRiyadh || null;
+          const rawTimeR = payload.consultationTimeRiyadh || payload.consultation_time_riyadh || contactConsultationTimeRiyadh || null;
+
+          // parse to Date (UTC)
+          const dt = parseToDate(rawUTC) || parseToDate(rawRiyadh) || (rawDateR && rawTimeR ? parseToDate(`${rawDateR} ${rawTimeR}`) : null);
+
+          if (dt) {
+            postBody.consultationAtUTC = dt.toISOString();
+            const r = fmtRiyadh(dt);
+            postBody.consultationAtRiyadh = r.full;
+            postBody.consultationDateRiyadh = r.date;
+            postBody.consultationTimeRiyadh = r.time;
+          } else {
+            // fallback: send whatever we have (cleaned)
+            postBody.consultationAtUTC = rawUTC || "";
+            postBody.consultationAtRiyadh = rawRiyadh || "";
+            postBody.consultationDateRiyadh = rawDateR || "";
+            postBody.consultationTimeRiyadh = rawTimeR || "";
+          }
         }
 
         await fetch(selectedSheetUrl, {
@@ -147,6 +227,8 @@ export default async function handler(req, res) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(postBody)
         });
+
+        console.log("Wrote row to sheet URL (consultation?)", isConsultation, selectedSheetUrl);
       } catch (e) {
         console.error("Failed to write webhook row to sheet:", e);
       }

@@ -5,10 +5,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    console.log("🔥 WEBHOOK RAW (preview):", JSON.stringify(req.body ? req.body : "<no-body>").slice(0, 2000));
-  } catch (e) { /* ignore */ }
+    try {
+      console.log("🔥 WEBHOOK RAW (preview):", JSON.stringify(req.body ? req.body : "<no-body>").slice(0, 2000));
+    } catch (e) { /* ignore */ }
 
-  try {
     const payload = req.body || {};
 
     // --- normalize payload (support nested TuwaiqPay shape) ---
@@ -59,13 +59,26 @@ export default async function handler(req, res) {
       return res.status(200).json({ received: true, note: "no billId" });
     }
 
-    // --- read contact/customerStatus from sheet via doGet ---
+    // Determine if this is a consultation (amount === 270)
+    const isConsultation = Number(amount) === 270;
+
+    // Choose which sheet URL to use depending on consultation or not
     const GSHEET_URL = process.env.GSHEET_URL;
+    const GSHEET_CONSULTATION_URL = process.env.GSHEET_CONSULTATION_URL;
+    const selectedSheetUrl = isConsultation ? GSHEET_CONSULTATION_URL : GSHEET_URL;
+
+    // contact fields (from sheet lookup)
     let contactPhone = "", contactEmail = "", contactName = "", contactStatus = "";
 
-    if (GSHEET_URL) {
+    // consultation fields (from sheet lookup)
+    let contactConsultationAtUTC = "";
+    let contactConsultationAtRiyadh = "";
+    let contactConsultationDateRiyadh = "";
+    let contactConsultationTimeRiyadh = "";
+
+    if (selectedSheetUrl) {
       try {
-        const resp = await fetch(`${GSHEET_URL}?billId=${encodeURIComponent(billId)}`);
+        const resp = await fetch(`${selectedSheetUrl}?billId=${encodeURIComponent(billId)}`);
         const text = await resp.text();
         let parsed;
         try { parsed = JSON.parse(text); } catch (e) { parsed = null; console.error("GSHEET doGet returned non-JSON:", text); }
@@ -75,36 +88,64 @@ export default async function handler(req, res) {
           contactEmail = parsed.record.email || "";
           contactName  = parsed.record.name || "";
           contactStatus = parsed.record.customerStatus || "";
-          console.log("Found sheet record for billId", billId, { contactPhone, contactEmail, contactName, contactStatus });
+
+          // <-- NEW: grab consultation fields from sheet record (with snake_case fallbacks)
+          contactConsultationAtUTC = parsed.record.consultationAtUTC || parsed.record.consultation_at_utc || "";
+          contactConsultationAtRiyadh = parsed.record.consultationAtRiyadh || parsed.record.consultation_at_riyadh || "";
+          contactConsultationDateRiyadh = parsed.record.consultationDateRiyadh || parsed.record.consultation_date_riyadh || "";
+          contactConsultationTimeRiyadh = parsed.record.consultationTimeRiyadh || parsed.record.consultation_time_riyadh || "";
+
+          console.log("Found sheet record for billId", billId, {
+            contactPhone,
+            contactEmail,
+            contactName,
+            contactStatus,
+            contactConsultationAtUTC,
+            contactConsultationAtRiyadh,
+            contactConsultationDateRiyadh,
+            contactConsultationTimeRiyadh,
+            isConsultation
+          });
         } else {
           console.warn("No record found in sheet for billId:", billId, parsed);
         }
       } catch (e) {
-        console.error("Error fetching GSHEET_URL:", e);
+        console.error("Error fetching selectedSheetUrl:", e);
       }
     } else {
-      console.warn("GSHEET_URL not set in env");
+      console.warn("Selected sheet URL not set in env (GSHEET_URL or GSHEET_CONSULTATION_URL)");
     }
 
     // --- POST update to sheet (append processed row including customerStatus) ---
-    if (GSHEET_URL) {
+    if (selectedSheetUrl) {
       try {
-        await fetch(GSHEET_URL, {
+        // Build base body
+        const postBody = {
+          billId,
+          customerStatus: contactStatus || "",
+          name: contactName || "",
+          phone: contactPhone || "",
+          email: contactEmail || "",
+          amount,
+          payment_link: "",
+          processed: (status === "SUCCESS" || status === "SETTLED" || status === "PAID") ? true : true,
+          transactionId: transactionId || merchantTransactionId || "",
+          paidAt: paidAt || new Date().toISOString(),
+          paymentStatus: status || ""
+        };
+
+        // If consultation, include the extra consultation fields (payload preferred, otherwise use sheet values)
+        if (isConsultation) {
+          postBody.consultationAtUTC = payload.consultationAtUTC || payload.consultation_at_utc || contactConsultationAtUTC || "";
+          postBody.consultationAtRiyadh = payload.consultationAtRiyadh || payload.consultation_at_riyadh || contactConsultationAtRiyadh || "";
+          postBody.consultationDateRiyadh = payload.consultationDateRiyadh || payload.consultation_date_riyadh || contactConsultationDateRiyadh || "";
+          postBody.consultationTimeRiyadh = payload.consultationTimeRiyadh || payload.consultation_time_riyadh || contactConsultationTimeRiyadh || "";
+        }
+
+        await fetch(selectedSheetUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            billId,
-            customerStatus: contactStatus || "",
-            name: contactName || "",
-            phone: contactPhone || "",
-            email: contactEmail || "",
-            amount,
-            payment_link: "",
-            processed: (status === "SUCCESS" || status === "SETTLED" || status === "PAID") ? true : true,
-            transactionId: transactionId || merchantTransactionId || "",
-            paidAt: paidAt || new Date().toISOString(),
-            paymentStatus: status || ""
-          })
+          body: JSON.stringify(postBody)
         });
       } catch (e) {
         console.error("Failed to write webhook row to sheet:", e);
@@ -112,33 +153,38 @@ export default async function handler(req, res) {
     }
 
     // --- forward to GoHighLevel (include contactStatus) ---
-    const ghlBody = {
-      billId,
-      transactionId,
-      merchantTransactionId,
-      amount,
-      status,
-      paymentMethod,
-      paidAt,
-      contactPhone,
-      contactEmail,
-      contactName,
-      contactStatus
-    };
+    // Only forward when NOT a consultation
+    if (!isConsultation) {
+      const ghlBody = {
+        billId,
+        transactionId,
+        merchantTransactionId,
+        amount,
+        status,
+        paymentMethod,
+        paidAt,
+        contactPhone,
+        contactEmail,
+        contactName,
+        contactStatus
+      };
 
-    if (process.env.GHL_WEBHOOK_URL) {
-      try {
-        const f = await fetch(process.env.GHL_WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(ghlBody)
-        });
-        console.log("Forwarded to GHL, status:", f.status);
-      } catch (e) {
-        console.error("Failed to forward to GHL:", e);
+      if (process.env.GHL_WEBHOOK_URL) {
+        try {
+          const f = await fetch(process.env.GHL_WEBHOOK_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(ghlBody)
+          });
+          console.log("Forwarded to GHL, status:", f.status);
+        } catch (e) {
+          console.error("Failed to forward to GHL:", e);
+        }
+      } else {
+        console.warn("GHL_WEBHOOK_URL not set");
       }
     } else {
-      console.warn("GHL_WEBHOOK_URL not set");
+      console.log("Consultation amount detected (270). Skipping GoHighLevel forwarding.");
     }
 
     return res.status(200).json({ received: true });
